@@ -24,6 +24,18 @@ const submitBtn = document.getElementById("reviewer-submit");
 const domainBox = document.getElementById("domain-options");
 const backgroundEl = document.getElementById("r-background");
 const counterEl = document.getElementById("background-counter");
+const emailEl = document.getElementById("r-email");
+const otpBox = document.getElementById("reviewer-email-otp");
+const otpCodeEl = document.getElementById("r-email-code");
+const otpStatusEl = document.getElementById("reviewer-email-otp-status");
+const sendCodeBtn = document.getElementById("reviewer-send-code");
+const verifyCodeBtn = document.getElementById("reviewer-verify-code");
+let otpRequired = null;
+let challengeId = null;
+let challengeEmail = null;
+let verificationToken = null;
+let verifiedEmail = null;
+submitBtn.disabled = true;
 
 /* Status codes that mean "this endpoint isn't there yet", as opposed to
    "your request was wrong" — only these trigger the GitHub fallback. */
@@ -92,6 +104,87 @@ function updateCounter() {
   counterEl.classList.toggle("is-met", n >= LIMITS.background.min);
 }
 
+function normalizedEmail() {
+  return emailEl.value.trim().toLowerCase();
+}
+
+function clearEmailProof() {
+  challengeId = null;
+  challengeEmail = null;
+  verificationToken = null;
+  verifiedEmail = null;
+  otpCodeEl.value = "";
+  verifyCodeBtn.disabled = true;
+  otpStatusEl.textContent = "";
+}
+
+emailEl.addEventListener("input", clearEmailProof);
+
+async function loadOtpRequirement() {
+  try {
+    const config = await controlPlaneFetch("/api/v1/auth/config");
+    if (typeof config?.form_mail_require_otp !== "boolean") {
+      throw new Error("Email verification settings are unavailable. Please reload the page.");
+    }
+    otpRequired = config.form_mail_require_otp;
+    otpBox.hidden = !otpRequired;
+    submitBtn.disabled = false;
+  } catch (error) {
+    setStatus(error.message || "The form is unavailable. Please reload the page.", "error");
+  }
+}
+
+sendCodeBtn.addEventListener("click", async () => {
+  const email = normalizedEmail();
+  if (!email || !emailEl.checkValidity()) {
+    showErrors({ email: "Enter a valid email address first." });
+    return;
+  }
+  clearErrors();
+  clearEmailProof();
+  sendCodeBtn.disabled = true;
+  otpStatusEl.textContent = "Sending code…";
+  try {
+    const result = await controlPlaneFetch("/api/v1/reviewers/email-otp", {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    });
+    challengeId = result.challenge_id;
+    challengeEmail = email;
+    otpStatusEl.textContent = "Code sent. Check your inbox and enter it here.";
+    verifyCodeBtn.disabled = false;
+    otpCodeEl.focus();
+  } catch (error) {
+    otpStatusEl.textContent = error.message || "Could not send the code. Please try again.";
+  } finally {
+    sendCodeBtn.disabled = false;
+  }
+});
+
+verifyCodeBtn.addEventListener("click", async () => {
+  const email = normalizedEmail();
+  if (!challengeId || challengeEmail !== email || !/^\d{6}$/.test(otpCodeEl.value.trim())) {
+    otpStatusEl.textContent = "Enter the six-digit code sent to this email address.";
+    return;
+  }
+  verifyCodeBtn.disabled = true;
+  otpStatusEl.textContent = "Verifying…";
+  try {
+    const result = await controlPlaneFetch("/api/v1/reviewers/email-otp/verify", {
+      method: "POST",
+      body: JSON.stringify({ email, challenge_id: challengeId, code: otpCodeEl.value.trim() }),
+    });
+    verificationToken = result.verification_token;
+    verifiedEmail = email;
+    otpStatusEl.textContent = "Email verified. You can send your application now.";
+  } catch (error) {
+    otpStatusEl.textContent = error.message || "The code could not be verified.";
+    verifyCodeBtn.disabled = false;
+  }
+});
+
+loadOtpRequirement();
+
 /* ---- GitHub fallback: the same application as a prefilled issue ---- */
 async function openOnGitHub(a) {
   const site = await getSite();
@@ -123,19 +216,32 @@ form.addEventListener("submit", async (event) => {
   }
   clearErrors();
 
+  if (otpRequired === null) {
+    setStatus("Email verification settings are still loading. Please try again.", "error");
+    return;
+  }
+  if (otpRequired && (!verificationToken || verifiedEmail !== normalizedEmail())) {
+    showErrors({ email_verification: "Verify your email before sending the application." });
+    setStatus("Email verification is required.", "error");
+    return;
+  }
+
   submitBtn.disabled = true;
   setStatus("Sending your application…");
   try {
+    const document = buildReviewerDocument(a);
+    if (otpRequired) document.email_verification_token = verificationToken;
     await controlPlaneFetch(REVIEWER_ENDPOINT, {
       method: "POST",
-      body: JSON.stringify(buildReviewerDocument(a)),
+      body: JSON.stringify(document),
     });
     form.reset();
+    clearEmailProof();
     domainBox.querySelectorAll("input:checked").forEach((el) => (el.checked = false));
     updateCounter();
     setStatus("Thank you. Your application was received, and we will be in touch by email.", "success");
   } catch (error) {
-    if (NOT_DEPLOYED.has(error?.status)) {
+    if (!otpRequired && NOT_DEPLOYED.has(error?.status)) {
       // Retain a graceful fallback for static deployments pointing at an older backend.
       await openOnGitHub(a);
     } else if (error?.status === 422) {
