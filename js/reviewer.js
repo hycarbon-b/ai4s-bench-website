@@ -27,7 +27,7 @@ export const LIMITS = {
   email: { min: 5, max: 200 },
   github: { min: 0, max: 100 },
   position: { min: 0, max: 200 },
-  field_name: { min: 0, max: 200 },
+  field_name: { min: 0, max: 160 },
   background: { min: 60, max: 4000 },
 };
 
