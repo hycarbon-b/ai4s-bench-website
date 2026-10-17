@@ -11,8 +11,7 @@
      expected: 201 with the created record, 422 on validation error.
 
    The reviewer endpoint is independent from task-proposal submission;
-   its `role` field is the person's position and its slugs are
-   lowercase-hyphen identifiers.
+   its `role` field is the person's position.
    ============================================================ */
 
 /** Public intake path on the control plane. */

@@ -3,8 +3,9 @@
    Global behavior: navigation, GitHub links, footer, a11y bits.
    ============================================================ */
 
-import { getSite, ROOT } from "./data.js?v=20261012-2";
-import "./motion.js?v=20261012-2";
+import { getSite, ROOT } from "./data.js?v=20261014-release1";
+import { accountCheckStep, reviewAccount } from "./account-verification.js?v=20261014-release1";
+import "./motion.js?v=20261014-release1";
 
 const controlPlaneConfig = getSite().then((site) => String(site.control_plane_url || "").replace(/\/$/, ""));
 
@@ -51,6 +52,20 @@ export async function currentUser() {
   return controlPlaneFetch("/api/v1/auth/me");
 }
 
+const accountCheckActions = {
+  fetchAccount: controlPlaneFetch,
+  connectGitHub: linkGitHub,
+  reloadUser: async () => {
+    const user = await currentUser();
+    document.dispatchEvent(new CustomEvent("ai4sbench:authchange", { detail: user }));
+    return user;
+  },
+};
+
+export function openAccountCheck(user, force = true) {
+  return reviewAccount(user, accountCheckActions, force);
+}
+
 export async function signOut() {
   await controlPlaneFetch("/api/v1/auth/logout", { method: "POST" });
   try {
@@ -91,6 +106,41 @@ export async function signInWithGitHub() {
         if (popup.closed) {
           window.clearInterval(poll);
           reject(new Error("GitHub sign-in was cancelled."));
+        }
+      }
+    }, 800);
+  });
+}
+
+export async function linkGitHub() {
+  const popup = window.open("", "ai4sbench-github-link", "popup,width=700,height=780");
+  if (!popup) throw new Error("Allow popups to connect GitHub.");
+  popup.document.title = "Connecting GitHub…";
+  const baseUrl = await controlPlaneConfig;
+  if (!baseUrl) {
+    popup.close();
+    throw new Error("GitHub connection is not configured yet.");
+  }
+  popup.location.assign(`${baseUrl}/auth/github/associate/start`);
+  return new Promise((resolve, reject) => {
+    const poll = window.setInterval(async () => {
+      try {
+        const user = await currentUser();
+        if (!user.github_linked) {
+          if (popup.closed) {
+            window.clearInterval(poll);
+            reject(new Error("GitHub connection was cancelled."));
+          }
+          return;
+        }
+        window.clearInterval(poll);
+        popup.close();
+        document.dispatchEvent(new CustomEvent("ai4sbench:authchange", { detail: user }));
+        resolve(user);
+      } catch (error) {
+        if (popup.closed) {
+          window.clearInterval(poll);
+          reject(error);
         }
       }
     }, 800);
@@ -201,6 +251,17 @@ function renderAccount(user, { unavailable = false } = {}) {
     link.textContent = label;
     accountMenu.append(link);
   }
+  if (accountCheckStep(user)) {
+    const check = document.createElement("button");
+    check.type = "button";
+    check.className = "site-nav__signout";
+    check.textContent = user.github_linked ? "Confirm email" : "Connect GitHub";
+    check.addEventListener("click", () => {
+      closeAccountMenu();
+      void openAccountCheck(user);
+    });
+    accountMenu.append(check);
+  }
   const logout = document.createElement("button");
   logout.type = "button";
   logout.className = "site-nav__signout";
@@ -217,7 +278,10 @@ async function refreshAccount() {
   const revision = ++accountRevision;
   try {
     const user = await currentUser();
-    if (revision === accountRevision) renderAccount(user);
+    if (revision === accountRevision) {
+      renderAccount(user);
+      void openAccountCheck(user, false);
+    }
   }
   catch (error) {
     if (revision === accountRevision) {
@@ -241,6 +305,7 @@ accountButton?.addEventListener("click", async () => {
 document.addEventListener("ai4sbench:authchange", (event) => {
   accountRevision += 1;
   renderAccount(event.detail);
+  void openAccountCheck(event.detail, false);
 });
 document.addEventListener("click", (event) => {
   if (account && !account.contains(event.target)) closeAccountMenu();
